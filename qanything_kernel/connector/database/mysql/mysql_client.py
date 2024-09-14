@@ -373,7 +373,7 @@ class KnowledgeBaseManager:
 
     # 对外接口不需要增加用户，新建知识库的时候增加用户就可以了
     def add_user_(self, user_id, user_name):
-        query = "INSERT IGNORE INTO User (user_id, user_name) VALUES (%s, %s, %s)"
+        query = "INSERT IGNORE INTO User (user_id, user_name) VALUES (%s, %s)"
         self.execute_query_(query, (user_id, user_name), commit=True)
         debug_logger.info(f"Add user: {user_id} {user_name}")
 
