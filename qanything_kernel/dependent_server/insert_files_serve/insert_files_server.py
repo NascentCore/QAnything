@@ -55,8 +55,8 @@ db_config = {
 
 @get_time_async
 async def process_data(retriever, milvus_kb, mysql_client, file_info, time_record):
-    parse_timeout_seconds = 300
-    insert_timeout_seconds = 300
+    parse_timeout_seconds = 10000
+    insert_timeout_seconds = 5000
     content_length = -1
     status = 'green'
     process_start = time.perf_counter()
@@ -105,9 +105,7 @@ async def process_data(retriever, milvus_kb, mysql_client, file_info, time_recor
 
     try:
         start = time.perf_counter()
-        chunks_number, insert_time_record = await asyncio.wait_for(
-            retriever.insert_documents(local_file.docs, chunk_size),
-            timeout=insert_timeout_seconds)
+        chunks_number, insert_time_record = await retriever.insert_documents(local_file.docs, chunk_size)
         insert_time = time.perf_counter()
         time_record.update(insert_time_record)
         insert_logger.info(f'insert time: {insert_time - start}')

@@ -17,6 +17,7 @@ from langchain_community.vectorstores.milvus import Milvus
 from langchain_elasticsearch import ElasticsearchStore
 import time
 import traceback
+import asyncio
 
 
 class SelfParentRetriever(ParentDocumentRetriever):
@@ -128,7 +129,11 @@ class SelfParentRetriever(ParentDocumentRetriever):
         time_record = {"split_time": round(time.perf_counter() - split_start, 2)}
 
         embed_docs = copy.deepcopy(docs)
+        embed_start = time.perf_counter()
+        insert_logger.info(f"Starting to process {len(embed_docs)} documents for embedding...")
+
         # 补充metadata信息
+        clean_start = time.perf_counter()
         for idx, doc in enumerate(embed_docs):
             del doc.metadata['title_lst']
             del doc.metadata['has_table']
@@ -137,23 +142,87 @@ class SelfParentRetriever(ParentDocumentRetriever):
             del doc.metadata['nos_key']
             del doc.metadata['faq_dict']
             del doc.metadata['page_id']
+        time_record["clean_metadata_time"] = round(time.perf_counter() - clean_start, 2)
+        insert_logger.info(f"Cleaned metadata in {time_record['clean_metadata_time']} seconds")
 
-        res = await self.vectorstore.aadd_documents(embed_docs, time_record=time_record)
-        insert_logger.info(f'vectorstore insert number: {len(res)}, {res[0]}')
+        # 添加向量存储的进度日志
+        insert_logger.info("Starting vectorstore insertion...")
+        vectorstore_start = time.perf_counter()
+
+        # 分批处理向量存储插入
+        batch_size = 200
+        all_res = []
+        total_batches = (len(embed_docs) - 1) // batch_size + 1
+
+        try:
+            for i in range(0, len(embed_docs), batch_size):
+                batch_start = time.perf_counter()
+                batch = embed_docs[i:i + batch_size]
+                current_batch = i // batch_size + 1
+                insert_logger.info(f"Processing vectorstore batch {current_batch}/{total_batches}, size: {len(batch)}")
+
+                retry_count = 3
+                while retry_count > 0:
+                    try:
+                        batch_res = await self.vectorstore.aadd_documents(batch, time_record=time_record)
+                        break
+                    except Exception as e:
+                        retry_count -= 1
+                        if retry_count == 0:
+                            raise
+                        insert_logger.warning(f"Batch {current_batch} failed, retrying... Error: {str(e)}")
+                        await asyncio.sleep(1)
+
+                all_res.extend(batch_res)
+                batch_time = round(time.perf_counter() - batch_start, 2)
+                insert_logger.info(f"Batch {current_batch}/{total_batches} completed in {batch_time} seconds")
+
+                # 更新进度
+                progress = min(75 + current_batch * 20 // total_batches, 95)
+                # 如果有可用的方法来更新进度
+                # update_progress(progress)
+
+                # 添加短暂延迟
+                await asyncio.sleep(0.1)
+
+            time_record["vectorstore_insert_time"] = round(time.perf_counter() - vectorstore_start, 2)
+            insert_logger.info(f"Vectorstore insertion completed in {time_record['vectorstore_insert_time']} seconds")
+            insert_logger.info(f'Total vectorstore insert number: {len(all_res)}')
+
+        except Exception as e:
+            error_msg = f"Error during vectorstore insertion after processing {len(all_res)} documents: {str(e)}"
+            insert_logger.error(error_msg)
+            if len(all_res) > 0:
+                # 部分成功的情况
+                return len(all_res), time_record
+            raise
+
+        # ES存储部分
         if es_store is not None:
             try:
                 es_start = time.perf_counter()
-                # docs的doc_id是file_id + '_' + i
+                insert_logger.info("Starting Elasticsearch insertion...")
                 docs_ids = [doc.metadata['file_id'] + '_' + str(i) for i, doc in enumerate(embed_docs)]
                 es_res = await es_store.aadd_documents(embed_docs, ids=docs_ids)
                 time_record['es_insert_time'] = round(time.perf_counter() - es_start, 2)
-                insert_logger.info(f'es_store insert number: {len(es_res)}, {es_res[0]}')
+                insert_logger.info(f"Elasticsearch insertion completed in {time_record['es_insert_time']} seconds")
+                insert_logger.info(f'es_store insert number: {len(es_res)}, first id: {es_res[0]}')
             except Exception as e:
                 insert_logger.error(f"Error in aadd_documents on es_store: {traceback.format_exc()}")
 
+        # Docstore存储部分
         if add_to_docstore:
+            docstore_start = time.perf_counter()
+            insert_logger.info("Starting docstore insertion...")
             await self.docstore.amset(full_docs)
-        return len(res), time_record
+            docstore_insert_time = round(time.perf_counter() - docstore_start, 2)
+            insert_logger.info(f"Docstore insertion completed in {docstore_insert_time} seconds")
+
+        total_time = round(time.perf_counter() - split_start, 2)
+        time_record["total_time"] = total_time
+        insert_logger.info(f"Total document insertion completed in {total_time} seconds")
+
+        return len(all_res), time_record
 
 
 class ParentRetriever:

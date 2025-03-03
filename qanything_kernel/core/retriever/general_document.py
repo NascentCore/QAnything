@@ -30,11 +30,14 @@ import traceback
 import openpyxl
 import shutil
 import time
+import fitz  # PyMuPDF
+import cv2
+import numpy as np
 
 
-def get_ocr_result_sync(image_data):
+def get_ocr_result_sync(image_data, timeout=120):
     try:
-        response = requests.post(f"http://{LOCAL_OCR_SERVICE_URL}/ocr", data=image_data, timeout=120)
+        response = requests.post(f"http://{LOCAL_OCR_SERVICE_URL}/ocr", data=image_data, timeout=timeout)
         response.raise_for_status()  # 如果请求返回了错误状态码，将会抛出异常
         ocr_res = response.text
         ocr_res = json.loads(ocr_res)
@@ -43,21 +46,113 @@ def get_ocr_result_sync(image_data):
         insert_logger.warning(f"ocr error: {traceback.format_exc()}")
         return None
 
-def get_pdf_result_sync(file_path):
+def get_pdf_result_sync(file_path, chunk_size=40):
+    """
+    分块处理PDF文件，避免单次处理过大文件导致超时
+    Args:
+        file_path: PDF文件路径
+        chunk_size: 每次处理的页数
+    Returns:
+        str: 合并后的markdown文件路径
+    """
+    temp_dir = None
     try:
-        data = {
-            'filename': file_path,
-            'save_dir': os.path.dirname(file_path)
-        }
+        # 使用PyMuPDF获取总页数
+        pdf_document = fitz.open(file_path)
+        total_pages = pdf_document.page_count
+        pdf_document.close()
+
+        # 创建临时目录存储分块结果
+        temp_dir = os.path.join(os.path.dirname(file_path), 'temp_chunks')
+        os.makedirs(temp_dir, exist_ok=True)
+
+        markdown_files = []
         headers = {"content-type": "application/json"}
-        response = requests.post(f"http://{LOCAL_PDF_PARSER_SERVICE_URL}/pdfparser", json=data, headers=headers,
-                                 timeout=240)
-        response.raise_for_status()  # 如果请求返回了错误状态码，将会抛出异常
-        response_json = response.json()
-        markdown_file = response_json.get('markdown_file')
-        return markdown_file
+
+        # 分块处理
+        for start_page in range(0, total_pages, chunk_size):
+            # 检查是否有超时标志
+            if getattr(threading.current_thread(), 'timeout_flag', False):
+                raise TimeoutError("Processing was interrupted due to timeout")
+
+            end_page = min(start_page + chunk_size, total_pages)
+            chunk_name = f"chunk_{start_page}_{end_page}.pdf"
+            chunk_path = os.path.join(temp_dir, chunk_name)
+
+            # 创建当前块的PDF
+            with fitz.open(file_path) as pdf:
+                chunk_pdf = fitz.open()
+                chunk_pdf.insert_pdf(pdf, from_page=start_page, to_page=end_page-1)
+                chunk_pdf.save(chunk_path)
+                chunk_pdf.close()
+
+            # 处理当前块
+            data = {
+                'filename': chunk_path,
+                'save_dir': temp_dir,
+                'start_page': start_page
+            }
+
+            # 添加重试机制
+            max_retries = 3
+            retry_delay = 5
+
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(
+                        f"http://{LOCAL_PDF_PARSER_SERVICE_URL}/pdfparser",
+                        json=data,
+                        headers=headers,
+                        timeout=600  # 增加超时时间
+                    )
+                    response.raise_for_status()
+                    response_json = response.json()
+                    chunk_markdown = response_json.get('markdown_file')
+
+                    if chunk_markdown and os.path.exists(chunk_markdown):
+                        markdown_files.append(chunk_markdown)
+                        insert_logger.info(f"Successfully processed pages {start_page}-{end_page}")
+                        break
+
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        insert_logger.warning(f"Attempt {attempt + 1} failed for pages {start_page}-{end_page}: {str(e)}")
+                        time.sleep(retry_delay)
+                    else:
+                        insert_logger.error(f"All attempts failed for pages {start_page}-{end_page}")
+                        raise
+
+            # 删除临时PDF块
+            os.remove(chunk_path)
+
+        # 合并所有markdown文件
+        if markdown_files:
+            final_markdown = os.path.join(os.path.dirname(file_path),
+                                        os.path.splitext(os.path.basename(file_path))[0] + '.md')
+
+            with open(final_markdown, 'w', encoding='utf-8') as outfile:
+                for md_file in markdown_files:
+                    with open(md_file, 'r', encoding='utf-8') as infile:
+                        outfile.write(infile.read() + '\n\n')
+                    # 删除临时markdown文件
+                    os.remove(md_file)
+
+            # 清理临时目录
+            shutil.rmtree(temp_dir)
+            return final_markdown
+
+    except TimeoutError:
+        insert_logger.warning("PDF processing interrupted due to timeout")
+        # 确保清理临时文件
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return None
+
     except Exception as e:
         insert_logger.warning(f"pdf parser error: {traceback.format_exc()}")
+        # 确保清理临时文件
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         return None
 
 
@@ -77,6 +172,7 @@ class LocalFileForInsert:
         self.faq_dict = {}
         self.file_path = ""
         self.mysql_client = mysql_client
+        self.timeout_flag = False  # 添加超时标志
         if self.file_location == 'FAQ':
             faq_info = self.mysql_client.get_faq(self.file_id)
             user_id, kb_id, question, answer, nos_keys = faq_info
@@ -362,6 +458,122 @@ class LocalFileForInsert:
             insert_logger.info(f"copy image: {single_image_path} -> {output_dir}")
             shutil.copy(single_image_path, output_dir)
 
+    # 将异步OCR服务调用移到类方法中
+    async def get_ocr_result_async(self, image_data, timeout=120):
+        """
+        异步调用OCR服务
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"http://{LOCAL_OCR_SERVICE_URL}/ocr",
+                    data=image_data,
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as response:
+                    response_text = await response.text()
+                    ocr_res = json.loads(response_text)
+                    return ocr_res['result']
+        except Exception as e:
+            insert_logger.warning(f"async ocr error: {traceback.format_exc()}")
+            return None
+
+    async def process_single_page(self, page, page_num, scale=2):
+        """
+        处理单个PDF页面的OCR
+        """
+        try:
+            # 将页面渲染为图片
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+
+            # 转换为OpenCV格式
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+
+            # 转换为base64
+            _, img_encoded = cv2.imencode('.png', img_array)
+            img_base64 = base64.b64encode(img_encoded).decode('utf-8')
+
+            # 调用OCR服务
+            img_data = {"img64": img_base64}
+            ocr_result = await self.get_ocr_result_async(img_data)  # 使用self调用类方法
+
+            if ocr_result:
+                page_text = [line for line in ocr_result if line]
+                return page_text, page_num
+            return None, page_num
+        except Exception as e:
+            insert_logger.error(f"Error processing page {page_num}: {str(e)}")
+            return None, page_num
+
+    async def process_pdf_with_ocr(self, pdf_path, scale=2, batch_size=5):
+        """
+        使用OCR处理PDF文件 - 异步并行版本
+        Args:
+            pdf_path: PDF文件路径
+            scale: 图片缩放比例,默认2x提高清晰度
+            batch_size: 并行处理的批次大小
+        Returns:
+            List[Document]: 处理后的文档列表
+        """
+        try:
+            pdf_document = fitz.open(pdf_path)
+            total_pages = pdf_document.page_count
+            insert_logger.info(f"Processing PDF with OCR, total pages: {total_pages}")
+
+            all_text = []
+            tasks = []
+            results = {}  # 用于存储有序的结果
+
+            # 分批处理页面
+            for batch_start in range(0, total_pages, batch_size):
+                batch_end = min(batch_start + batch_size, total_pages)
+                batch_tasks = []
+
+                # 创建这一批次的任务
+                for page_num in range(batch_start, batch_end):
+                    page = pdf_document[page_num]
+                    task = self.process_single_page(page, page_num, scale)
+                    batch_tasks.append(task)
+
+                # 等待当前批次完成
+                batch_results = await asyncio.gather(*batch_tasks)
+
+                # 处理结果
+                for result, page_num in batch_results:
+                    if result:
+                        results[page_num] = result
+
+                # 更新进度
+                progress = int((batch_end / total_pages) * 100)
+                insert_logger.info(f"OCR Progress: {progress}%")
+
+            # 按页码顺序组织结果
+            for page_num in range(total_pages):
+                if page_num in results:
+                    all_text.extend(results[page_num])
+                    all_text.append(f"\n--- Page {page_num + 1} ---\n")
+
+            pdf_document.close()
+
+            if all_text:
+                # 将所有页面的文本合并为一个文档
+                combined_text = '\n'.join(all_text)
+                return [Document(page_content=combined_text)]
+            else:
+                insert_logger.warning("No text extracted from PDF using OCR")
+                return []
+
+        except Exception as e:
+            insert_logger.error(f"Error in OCR processing: {traceback.format_exc()}")
+            return []
+
+    def set_timeout(self):
+        """设置超时标志"""
+        self.timeout_flag = True
+        # 设置线程的超时标志
+        threading.current_thread().timeout_flag = True
+
     @get_time
     def split_file_to_docs(self):
         insert_logger.info(f"start split file to docs, file_path: {self.file_name}")
@@ -391,17 +603,32 @@ class LocalFileForInsert:
         elif self.file_path.lower().endswith(".txt"):
             docs = self.load_text(self.file_path)
         elif self.file_path.lower().endswith(".pdf"):
-            markdown_file = get_pdf_result_sync(self.file_path)
-            if markdown_file:
-                docs = convert_markdown_to_langchaindoc(markdown_file)
-                docs = self.markdown_process(docs)
-                images_dir = os.path.join(IMAGES_ROOT_PATH, self.file_id)
-                self.copy_images(os.path.dirname(markdown_file), images_dir)
-            else:
-                insert_logger.warning(
-                    f'Error in Powerful PDF parsing, use fast PDF parser instead.')
-                loader = UnstructuredPaddlePDFLoader(self.file_path, strategy="fast")
-                docs = loader.load()
+            try:
+                if is_scanned_pdf(self.file_path):
+                    insert_logger.info("Detected scanned PDF, using OCR directly...")
+                    docs = asyncio.run(self.process_pdf_with_ocr(self.file_path))
+                else:
+                    insert_logger.info("Processing regular PDF...")
+                    markdown_file = get_pdf_result_sync(self.file_path)
+                    if markdown_file and os.path.exists(markdown_file):
+                        # 检查超时标志
+                        if self.timeout_flag:
+                            raise TimeoutError("Processing was interrupted due to timeout")
+
+                        images_dir = os.path.join(IMAGES_ROOT_PATH, self.file_id)
+                        self.copy_images(os.path.dirname(markdown_file), images_dir)
+
+                        docs = convert_markdown_to_langchaindoc(markdown_file)
+                        docs = self.markdown_process(docs)
+                    else:
+                        insert_logger.warning("Regular PDF parsing failed, falling back to OCR...")
+                        docs = asyncio.run(self.process_pdf_with_ocr(self.file_path))
+            except TimeoutError:
+                self.set_timeout()
+                raise
+            except Exception as e:
+                insert_logger.warning(f'Error in PDF processing: {traceback.format_exc()}')
+                docs = []
         elif self.file_path.lower().endswith(".jpg") or self.file_path.lower().endswith(
                 ".png") or self.file_path.lower().endswith(".jpeg"):
             txt_file_path = self.image_ocr_txt(filepath=self.file_path)
@@ -512,3 +739,40 @@ class LocalFileForInsert:
                     merged_docs.append(doc)
         insert_logger.info(f"after merge doc lens: {len(merged_docs)}")
         self.docs = merged_docs
+
+def is_scanned_pdf(file_path):
+    """
+    判断PDF是否为扫描版
+    Returns:
+        bool: True表示是扫描版,False表示是普通版
+    """
+    try:
+        pdf_document = fitz.open(file_path)
+
+        # 1. 检查前3页(或总页数,取较小值)
+        check_pages = min(3, pdf_document.page_count)
+        for page_num in range(check_pages):
+            page = pdf_document[page_num]
+
+            # 2. 检查是否包含文本
+            text = page.get_text()
+            if len(text.strip()) < 50:  # 如果页面文本少于50个字符
+
+                # 3. 检查图片数量
+                image_list = page.get_images()
+                if len(image_list) > 0:  # 包含图片
+                    pdf_document.close()
+                    return True
+
+            # 4. 检查字体信息
+            fonts = page.get_fonts()
+            if len(fonts) < 2:  # 扫描版通常缺少字体信息
+                pdf_document.close()
+                return True
+
+        pdf_document.close()
+        return False
+
+    except Exception as e:
+        insert_logger.warning(f"Error checking PDF type: {traceback.format_exc()}")
+        return True  # 发生错误时默认按扫描版处理

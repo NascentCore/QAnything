@@ -42,7 +42,7 @@ app = Sanic("QAnything")
 app.config.CORS_ORIGINS = "*"
 Extend(app)
 # 设置请求体最大为 128MB
-app.config.REQUEST_MAX_SIZE = 128 * 1024 * 1024
+app.config.REQUEST_MAX_SIZE = 500 * 1024 * 1024
 
 # 将 /qanything 路径映射到 ./dist/qanything 文件夹，并指定路由名称
 app.static('/qanything/', 'qanything_kernel/qanything_server/dist/qanything/', name='qanything', index="index.html")

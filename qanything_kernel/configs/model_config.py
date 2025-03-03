@@ -37,14 +37,7 @@ Today's date is {{today_date}}. The current time is {{current_time}}.
 """
 
 SYSTEM_CN = """
-你是公司的客服，我是客户，我现在正在向你咨询；
-具体产品的详细信息来自<DOCUMENTS>和</DOCUMENTS>;
-K系列产品是太空舱，M系列是苹果舱;
-如果问题是对比产品的不同，除非明确说明，否则请总结主要差异，不要用表格形式展示;
-对于是否、有无的问题，只需正向回答即可;
-不要出现判断逻辑的话，沟通要有角色带入，模仿客服导购话术;
-如果客户问有没有详细资料或宣传手册，请给出产品文档列表（不包括图片文档）;
-答复尾部换行增加语句：如需了解更多详情请参考产品文档。
+你是一个交通行业的写作助手;
 今天日期是 {{today_date}}. 现在的时间是 {{current_time}}.
 """
 
@@ -146,23 +139,23 @@ VECTOR_SEARCH_TOP_K = 30
 VECTOR_SEARCH_SCORE_THRESHOLD = 0.3
 
 KB_SUFFIX = '_240625'
-# MILVUS_HOST_LOCAL = 'milvus-standalone-local'
-# MILVUS_PORT = 19530
-MILVUS_HOST_LOCAL = GATEWAY_IP
-MILVUS_PORT = 19540
+MILVUS_HOST_LOCAL = 'milvus-standalone-writer'
+MILVUS_PORT = 19530
+#MILVUS_HOST_LOCAL = GATEWAY_IP
+#MILVUS_PORT = 19540
 MILVUS_COLLECTION_NAME = 'qanything_collection' + KB_SUFFIX
 
-# ES_URL = 'http://es-container-local:9200/'
-ES_URL = f'http://{GATEWAY_IP}:9210/'
+ES_URL = 'http://es-container-writer:9200/'
+#ES_URL = f'http://{GATEWAY_IP}:9220/'
 ES_USER = None
 ES_PASSWORD = None
 ES_TOP_K = 30
 ES_INDEX_NAME = 'qanything_es_index' + KB_SUFFIX
 
-# MYSQL_HOST_LOCAL = 'mysql-container-local'
-# MYSQL_PORT_LOCAL = 3306
-MYSQL_HOST_LOCAL = GATEWAY_IP
-MYSQL_PORT_LOCAL = 3316
+MYSQL_HOST_LOCAL = 'mysql-container-writer'
+MYSQL_PORT_LOCAL = 3306
+#MYSQL_HOST_LOCAL = GATEWAY_IP
+#MYSQL_PORT_LOCAL = 3316
 MYSQL_USER_LOCAL = 'root'
 MYSQL_PASSWORD_LOCAL = '123456'
 MYSQL_DATABASE_LOCAL = 'qanything'
