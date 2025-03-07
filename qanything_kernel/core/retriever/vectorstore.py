@@ -2,22 +2,27 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Optional, List, Any, Iterable, Callable
 from qanything_kernel.utils.custom_log import debug_logger, insert_logger
-from qanything_kernel.configs.model_config import MILVUS_PORT, MILVUS_COLLECTION_NAME, MILVUS_HOST_LOCAL
+from qanything_kernel.configs.model_config import MILVUS_PORT, MILVUS_COLLECTION_NAME, MILVUS_HOST_LOCAL, EMBEDDING_CONCURRENCY
 from qanything_kernel.connector.embedding.embedding_for_online_client import YouDaoEmbeddings
 from qanything_kernel.utils.general_utils import get_time, get_time_async
 from langchain_community.vectorstores.milvus import Milvus
-from pymilvus.orm.collection import MutationResult
+from pymilvus.orm.collection import MutationResult, Collection
 import asyncio
 import time
+from threading import local
 
 
 class SelfMilvus(Milvus):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, semaphore=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.last_flush_time = 0  # 初始化为0，确保首次调用_should_flush时返回True
+        self.last_flush_time = 0
         self.inserted_since_last_flush = 0
-        self.flush_interval = 600  # 600 seconds
-        self.flush_threshold = 10000  # 10,000 entities
+        self.flush_interval = 600
+        self.flush_threshold = 10000
+        self.expected_dim = 768
+        self.max_retries = 3
+        self._semaphore = semaphore or asyncio.Semaphore(EMBEDDING_CONCURRENCY)  # 使用相同的配置
+        self._batch_queue = asyncio.Queue()
 
     def _should_flush(self) -> bool:
         current_time = time.time()
@@ -152,6 +157,70 @@ class SelfMilvus(Milvus):
             raise exc
         return query_result
 
+    def _get_metadata_fields(self, metadatas: List[dict]) -> dict:
+        """
+        从metadata列表中提取字段和值
+        """
+        if not metadatas:
+            return {}
+
+        result = {}
+        # 获取所有可用的字段名
+        keys = (
+            [x for x in self.fields if x != self._primary_field]
+            if self.auto_id
+            else [x for x in self.fields]
+        )
+
+        # 遍历每个metadata字典
+        for key in keys:
+            values = []
+            for d in metadatas:
+                if key in d:
+                    values.append(d[key])
+            if values:
+                result[key] = values
+
+        return result
+
+    async def _process_batch(self, batch_texts, metadatas, timeout, batch_size, ids=None):
+        """处理单个批次的文档"""
+        async with self._semaphore:
+            try:
+                embeddings = await self.embedding_func.aembed_documents(batch_texts)
+
+                # 验证embeddings
+                if not embeddings or len(embeddings) != len(batch_texts):
+                    raise ValueError(f"Embedding count mismatch: got {len(embeddings)}, expected {len(batch_texts)}")
+
+                # 准备插入数据
+                insert_dict = {
+                    self._text_field: batch_texts,
+                    self._vector_field: embeddings,
+                }
+
+                if not self.auto_id and ids:
+                    insert_dict[self._primary_field] = ids
+
+                # 添加metadata
+                if metadatas:
+                    if self._metadata_field is not None:
+                        insert_dict[self._metadata_field] = metadatas
+                    else:
+                        metadata_fields = self._get_metadata_fields(metadatas)
+                        insert_dict.update(metadata_fields)
+
+                # 执行插入
+                res = await asyncio.to_thread(self.col.insert,
+                    [insert_dict[x] for x in self.fields if x in insert_dict],
+                    timeout=timeout)
+
+                return res.primary_keys
+
+            except Exception as e:
+                debug_logger.error(f"Batch processing failed: {str(e)}")
+                raise
+
     async def aadd_texts(
             self,
             texts: Iterable[str],
@@ -162,103 +231,43 @@ class SelfMilvus(Milvus):
             ids: Optional[List[str]] = None,
             **kwargs: Any,
     ) -> List[str]:
-        """Asynchronously run texts through embeddings and add to the vectorstore."""
-        # 从kwargs中获取time_record
+        """使用任务队列处理文档"""
         time_record = kwargs.get('time_record', {})
-
-        from pymilvus import Collection, MilvusException
-
         texts = list(texts)
-        if not self.auto_id:
-            assert isinstance(ids, list), "A list of valid ids are required when auto_id is False."
-            assert len(set(ids)) == len(texts), "Different lengths of texts and unique ids are provided."
-            assert all(len(x.encode()) <= 65_535 for x in ids), "Each id should be a string less than 65535 bytes."
+        pks = []
 
-        # Assuming self.embedding_func has an async method embed_documents_async
-        embedding_start = time.perf_counter()
-        try:
-            embeddings = await self.embedding_func.aembed_documents(texts)
-        except NotImplementedError:
-            embeddings = [await self.embedding_func.aembed_query(x) for x in texts]
-        time_record['milvus_embedding_time'] = round(time.perf_counter() - embedding_start, 2)
-
-        if len(embeddings) == 0:
-            insert_logger.info("Nothing to insert, skipping.")
-            return []
-
-        # If the collection hasn't been initialized yet, perform all steps to do so
+        # 初始化collection如果需要
         if not isinstance(self.col, Collection):
-            kwargs = {"embeddings": embeddings, "metadatas": metadatas}
-            if self.partition_names:
-                kwargs["partition_names"] = self.partition_names
-            if self.replica_number:
-                kwargs["replica_number"] = self.replica_number
-            if self.timeout:
-                kwargs["timeout"] = self.timeout
-            self._init(**kwargs)
+            init_embeddings = await self.embedding_func.aembed_documents(texts[:1])
+            self._init(embeddings=init_embeddings, metadatas=metadatas[:1] if metadatas else None)
 
-        # Dict to hold all insert columns
-        insert_dict: dict[str, list] = {
-            self._text_field: texts,
-            self._vector_field: embeddings,
-        }
+        # 创建批次任务
+        tasks = []
+        for i in range(0, len(texts), batch_size):
+            end = min(i + batch_size, len(texts))
+            batch_texts = texts[i:end]
+            batch_ids = ids[i:end] if ids else None
 
-        if not self.auto_id:
-            insert_dict[self._primary_field] = ids
-
-        if self._metadata_field is not None:
-            for d in metadatas or []:
-                insert_dict.setdefault(self._metadata_field, []).append(d)
-        else:
-            # Collect the metadata into the insert dict.
-            if metadatas is not None:
-                for d in metadatas:
-                    for key, value in d.items():
-                        keys = (
-                            [x for x in self.fields if x != self._primary_field]
-                            if self.auto_id
-                            else [x for x in self.fields]
-                        )
-                        if key in keys:
-                            insert_dict.setdefault(key, []).append(value)
-
-        # Total insert count
-        vectors: list = insert_dict[self._vector_field]
-        total_count = len(vectors)
-
-        pks: list[str] = []
-
-        insert_start = time.perf_counter()
-        assert isinstance(self.col, Collection)
-        for i in range(0, total_count, batch_size):
-            # Grab end index
-            end = min(i + batch_size, total_count)
-            # Convert dict to list of lists batch for insertion
-            insert_list = [
-                insert_dict[x][i:end] for x in self.fields if x in insert_dict
-            ]
-            # Insert into the collection.
-            try:
-                res: MutationResult = await asyncio.to_thread(
-                    self.col.insert, insert_list, timeout=timeout, **kwargs
+            task = asyncio.create_task(
+                self._process_batch(
+                    batch_texts,
+                    metadatas,
+                    timeout,
+                    batch_size,
+                    batch_ids
                 )
-                # insert_logger.info(f"insert: {res}, insert keys: {res.primary_keys}")
-                insert_logger.info(f"insert: {res}")
-                pks.extend(res.primary_keys)
-            except MilvusException as e:
-                insert_logger.error(
-                    "Failed to insert batch starting at entity: %s/%s", i, total_count
-                )
-                raise e
-            self.inserted_since_last_flush += end - i
+            )
+            tasks.append(task)
 
-        time_record['milvus_insert_time'] = round(time.perf_counter() - insert_start, 2)
+        # 等待所有任务完成
+        try:
+            results = await asyncio.gather(*tasks)
+            for batch_pks in results:
+                pks.extend(batch_pks)
+        except Exception as e:
+            debug_logger.error(f"Document processing failed: {str(e)}")
+            raise
 
-        asyncio.create_task(asyncio.to_thread(self.col.flush))
-        # if self._should_flush():
-        #     self._milvus_flush()
-
-        # self.col.flush()
         return pks
 
 
@@ -267,17 +276,27 @@ class VectorStoreMilvusClient:
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.host = MILVUS_HOST_LOCAL
         self.port = MILVUS_PORT
-        self.local_vectorstore: Milvus = SelfMilvus(
-            embedding_function=YouDaoEmbeddings(),
-            connection_args={"host": self.host, "port": self.port},
-            collection_name=MILVUS_COLLECTION_NAME,
-            partition_key_field="kb_id",
-            # primary_field="doc_id",
-            auto_id=True,
-            search_params={"params": {"ef": 64}}
-        )
+        self._local_storage = local()
+        self._semaphore = asyncio.Semaphore(EMBEDDING_CONCURRENCY)  # 使用相同的配置
         debug_logger.info(
             f'init vectorstore {self.host}, {MILVUS_COLLECTION_NAME}')
+
+    @property
+    def local_vectorstore(self) -> Milvus:
+        """
+        使用线程本地存储确保每个worker使用独立的实例
+        """
+        if not hasattr(self._local_storage, 'vectorstore'):
+            self._local_storage.vectorstore = SelfMilvus(
+                embedding_function=YouDaoEmbeddings(semaphore=self._semaphore),  # 传递信号量
+                connection_args={"host": self.host, "port": self.port},
+                collection_name=MILVUS_COLLECTION_NAME,
+                partition_key_field="kb_id",
+                auto_id=True,
+                search_params={"params": {"ef": 64}},
+                semaphore=self._semaphore  # 传递相同的信号量给SelfMilvus
+            )
+        return self._local_storage.vectorstore
 
     def get_local_chunks(self, expr, timeout=10):
         future = self.executor.submit(

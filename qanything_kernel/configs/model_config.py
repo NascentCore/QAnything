@@ -42,19 +42,16 @@ SYSTEM_CN = """
 """
 
 INSTRUCTIONS = """
-- All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- If the reference information does not contain an answer to the question, please immediately respond: "The retrieved reference information does not provide sufficient details.".
-- Before answering, confirm the number of key points or pieces of information required, ensuring nothing is overlooked.
-- Return your answer in Markdown formatting, Respond using the same language as the content between <QUESTION> and </QUESTION> .
-- If the answer contains Chinese, please translate it into English and output only the English translation.
-- Now, answer the following question based on the above retrieved documents:
+- <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
+- 如果参考信息中不包含问题的答案，请根据你的能力进行回答，回答要符合事实，不要胡编乱造。
+- 使用 Markdown 格式返回您的答案，并使用 <QUESTION> 和 </QUESTION> 之间的内容相同的语言作答。
+- 现在，请根据以上检索到的文档回答以下问题：
 {{question}}
 """
 
 INSTRUCTIONS_CN = """
 - <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
-- 如果参考信息中不包含问题的答案，请立即回复：“检索到的参考信息并未提供充足的信息。”
-- 在回答之前，请确认所需关键点或信息的数量，确保没有遗漏。
+- 如果参考信息中不包含问题的答案，请根据你的能力进行回答，回答要符合事实，不要胡编乱造。
 - 使用 Markdown 格式返回您的答案，并使用 <QUESTION> 和 </QUESTION> 之间的内容相同的语言作答。
 - 现在，请根据以上检索到的文档回答以下问题：
 {{question}}
@@ -62,8 +59,7 @@ INSTRUCTIONS_CN = """
 
 INSTRUCTIONS2 = """
 - All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- If you cannot answer based on the given information, you need to answer based on your own knowledge, And combined with the context, but don't make up anything. If it is beyond your knowledge, you can answer \"抱歉，已知的信息不足，因此无法回答。\".
-- Before answering, confirm the number of key points or pieces of information required, ensuring nothing is overlooked.
+- If the reference information does not contain the answer to the question, please answer it to the best of your ability. Your answer should be factual and not made up.
 - Now, answer the following question based on the above retrieved documents(Let's think step by step):
 {{question}}
 - Return your answer in Markdown formatting, and in the same language as the question "{{question}}".
@@ -88,17 +84,18 @@ PROMPT_TEMPLATE = """
 """
 
 CUSTOM_PROMPT_TEMPLATE = """
-<USER_INSTRUCTIONS>
+<FIRST_DOCUMENTS>
 {{custom_prompt}}
-</USER_INSTRUCTIONS>
+</FIRST_DOCUMENTS>
 
 <DOCUMENTS>
 {{context}}
 </DOCUMENTS>
 
 <INSTRUCTIONS>
-- All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- Now, answer the following question based on the above retrieved documents(Let's think step by step):
+- <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
+- <FIRST_DOCUMENTS> 和 </FIRST_DOCUMENTS> 之间的所有内容也是参考信息，优先级高于<DOCUMENTS> 和 </DOCUMENTS> 之间的内容。
+- 使用 Markdown 格式返回您的答案，现在，请根据以上检索到的文档回答以下问题：
 {{question}}
 </INSTRUCTIONS>
 """
@@ -179,6 +176,7 @@ LOCAL_EMBED_BATCH = 1
 LOCAL_EMBED_THREADS = 1
 LOCAL_EMBED_PATH = os.path.join(root_path, 'qanything_kernel/dependent_server/embedding_server', 'embedding_model_configs_v0.0.1')
 LOCAL_EMBED_MODEL_PATH = os.path.join(LOCAL_EMBED_PATH, "embed.onnx")
+EMBEDDING_CONCURRENCY = 5
 
 TOKENIZER_PATH = os.path.join(root_path, 'qanything_kernel/connector/llm/tokenizer_files')
 

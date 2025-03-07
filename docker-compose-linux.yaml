@@ -106,6 +106,7 @@ services:
     command: --max-connections=10000
     environment:
       - MYSQL_ROOT_PASSWORD=123456
+      - TZ=Asia/Shanghai
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mysql:/var/lib/mysql
 
@@ -122,6 +123,7 @@ services:
       - "8778:8777"
         #network_mode: "host"
     environment:
+      - TZ=Asia/Shanghai
       - NCCL_LAUNCH_MODE=PARALLEL
       - GPUID=${GPUID:-0}
       - USER_IP=${USER_IP:-0.0.0.0}

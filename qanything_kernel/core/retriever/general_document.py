@@ -47,112 +47,20 @@ def get_ocr_result_sync(image_data, timeout=120):
         return None
 
 def get_pdf_result_sync(file_path, chunk_size=40):
-    """
-    分块处理PDF文件，避免单次处理过大文件导致超时
-    Args:
-        file_path: PDF文件路径
-        chunk_size: 每次处理的页数
-    Returns:
-        str: 合并后的markdown文件路径
-    """
-    temp_dir = None
     try:
-        # 使用PyMuPDF获取总页数
-        pdf_document = fitz.open(file_path)
-        total_pages = pdf_document.page_count
-        pdf_document.close()
-
-        # 创建临时目录存储分块结果
-        temp_dir = os.path.join(os.path.dirname(file_path), 'temp_chunks')
-        os.makedirs(temp_dir, exist_ok=True)
-
-        markdown_files = []
+        data = {
+            'filename': file_path,
+            'save_dir': os.path.dirname(file_path)
+        }
         headers = {"content-type": "application/json"}
-
-        # 分块处理
-        for start_page in range(0, total_pages, chunk_size):
-            # 检查是否有超时标志
-            if getattr(threading.current_thread(), 'timeout_flag', False):
-                raise TimeoutError("Processing was interrupted due to timeout")
-
-            end_page = min(start_page + chunk_size, total_pages)
-            chunk_name = f"chunk_{start_page}_{end_page}.pdf"
-            chunk_path = os.path.join(temp_dir, chunk_name)
-
-            # 创建当前块的PDF
-            with fitz.open(file_path) as pdf:
-                chunk_pdf = fitz.open()
-                chunk_pdf.insert_pdf(pdf, from_page=start_page, to_page=end_page-1)
-                chunk_pdf.save(chunk_path)
-                chunk_pdf.close()
-
-            # 处理当前块
-            data = {
-                'filename': chunk_path,
-                'save_dir': temp_dir,
-                'start_page': start_page
-            }
-
-            # 添加重试机制
-            max_retries = 3
-            retry_delay = 5
-
-            for attempt in range(max_retries):
-                try:
-                    response = requests.post(
-                        f"http://{LOCAL_PDF_PARSER_SERVICE_URL}/pdfparser",
-                        json=data,
-                        headers=headers,
-                        timeout=600  # 增加超时时间
-                    )
-                    response.raise_for_status()
-                    response_json = response.json()
-                    chunk_markdown = response_json.get('markdown_file')
-
-                    if chunk_markdown and os.path.exists(chunk_markdown):
-                        markdown_files.append(chunk_markdown)
-                        insert_logger.info(f"Successfully processed pages {start_page}-{end_page}")
-                        break
-
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        insert_logger.warning(f"Attempt {attempt + 1} failed for pages {start_page}-{end_page}: {str(e)}")
-                        time.sleep(retry_delay)
-                    else:
-                        insert_logger.error(f"All attempts failed for pages {start_page}-{end_page}")
-                        raise
-
-            # 删除临时PDF块
-            os.remove(chunk_path)
-
-        # 合并所有markdown文件
-        if markdown_files:
-            final_markdown = os.path.join(os.path.dirname(file_path),
-                                        os.path.splitext(os.path.basename(file_path))[0] + '.md')
-
-            with open(final_markdown, 'w', encoding='utf-8') as outfile:
-                for md_file in markdown_files:
-                    with open(md_file, 'r', encoding='utf-8') as infile:
-                        outfile.write(infile.read() + '\n\n')
-                    # 删除临时markdown文件
-                    os.remove(md_file)
-
-            # 清理临时目录
-            shutil.rmtree(temp_dir)
-            return final_markdown
-
-    except TimeoutError:
-        insert_logger.warning("PDF processing interrupted due to timeout")
-        # 确保清理临时文件
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        return None
-
+        response = requests.post(f"http://{LOCAL_PDF_PARSER_SERVICE_URL}/pdfparser", json=data, headers=headers,
+                                 timeout=240)
+        response.raise_for_status()  # 如果请求返回了错误状态码，将会抛出异常
+        response_json = response.json()
+        markdown_file = response_json.get('markdown_file')
+        return markdown_file
     except Exception as e:
         insert_logger.warning(f"pdf parser error: {traceback.format_exc()}")
-        # 确保清理临时文件
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
         return None
 
 
@@ -459,23 +367,56 @@ class LocalFileForInsert:
             shutil.copy(single_image_path, output_dir)
 
     # 将异步OCR服务调用移到类方法中
-    async def get_ocr_result_async(self, image_data, timeout=120):
+    async def get_ocr_result_async(self, image_data, timeout=120, retries=3):
         """
-        异步调用OCR服务
+        异步调用OCR服务，带重试机制
+        Args:
+            image_data: 图片数据
+            timeout: 超时时间(秒)
+            retries: 重试次数
         """
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"http://{LOCAL_OCR_SERVICE_URL}/ocr",
-                    data=image_data,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response:
-                    response_text = await response.text()
-                    ocr_res = json.loads(response_text)
-                    return ocr_res['result']
-        except Exception as e:
-            insert_logger.warning(f"async ocr error: {traceback.format_exc()}")
-            return None
+        for attempt in range(retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"http://{LOCAL_OCR_SERVICE_URL}/ocr",
+                        data=image_data,
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                    ) as response:
+                        if response.status != 200:
+                            insert_logger.warning(f"OCR service returned status {response.status}")
+                            continue
+
+                        response_text = await response.text()
+                        ocr_res = json.loads(response_text)
+                        return ocr_res['result']
+
+            except asyncio.TimeoutError:
+                insert_logger.warning(f"OCR request timeout (attempt {attempt + 1}/{retries})")
+                if attempt == retries - 1:
+                    insert_logger.error("OCR service timeout after all retries")
+                    return None
+
+            except aiohttp.ClientError as e:
+                insert_logger.warning(f"OCR network error (attempt {attempt + 1}/{retries}): {str(e)}")
+                if attempt == retries - 1:
+                    insert_logger.error("OCR service failed after all retries")
+                    return None
+
+            except json.JSONDecodeError:
+                insert_logger.warning(f"Invalid JSON response from OCR service (attempt {attempt + 1}/{retries})")
+                if attempt == retries - 1:
+                    return None
+
+            except Exception as e:
+                insert_logger.error(f"Unexpected error in OCR request: {traceback.format_exc()}")
+                return None
+
+            # 在重试之间添加延迟，避免立即重试
+            if attempt < retries - 1:
+                await asyncio.sleep(2 ** attempt)  # 指数退避
+
+        return None
 
     async def process_single_page(self, page, page_num, scale=2):
         """

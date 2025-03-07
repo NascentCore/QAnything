@@ -149,8 +149,8 @@ class SelfParentRetriever(ParentDocumentRetriever):
         insert_logger.info("Starting vectorstore insertion...")
         vectorstore_start = time.perf_counter()
 
-        # 分批处理向量存储插入
-        batch_size = 200
+        # 修改批处理大小和重试逻辑
+        batch_size = 50  # 减小批处理大小
         all_res = []
         total_batches = (len(embed_docs) - 1) // batch_size + 1
 
@@ -162,38 +162,59 @@ class SelfParentRetriever(ParentDocumentRetriever):
                 insert_logger.info(f"Processing vectorstore batch {current_batch}/{total_batches}, size: {len(batch)}")
 
                 retry_count = 3
+                last_error = None
                 while retry_count > 0:
                     try:
+                        # 在添加文档前检查向量维度
+                        for doc in batch:
+                            content_length = len(doc.page_content.split())
+                            if content_length > 200:  # 如果内容过长，进行截断
+                                doc.page_content = ' '.join(doc.page_content.split()[:200])
+                                insert_logger.warning(f"Document content truncated to 200 tokens")
+
                         batch_res = await self.vectorstore.aadd_documents(batch, time_record=time_record)
                         break
                     except Exception as e:
+                        last_error = e
                         retry_count -= 1
-                        if retry_count == 0:
-                            raise
-                        insert_logger.warning(f"Batch {current_batch} failed, retrying... Error: {str(e)}")
-                        await asyncio.sleep(1)
+                        error_msg = str(e)
+
+                        if "Field data size misaligned" in error_msg or "field dim is" in error_msg:
+                            insert_logger.warning(f"Dimension mismatch in batch {current_batch}, attempting to fix...")
+                            # 尝试修复维度问题
+                            try:
+                                # 重新分割过长的文档
+                                text_splitter = RecursiveCharacterTextSplitter(
+                                    chunk_size=200,
+                                    chunk_overlap=20,
+                                    length_function=num_tokens_embed
+                                )
+                                fixed_batch = []
+                                for doc in batch:
+                                    split_docs = text_splitter.split_documents([doc])
+                                    fixed_batch.extend(split_docs)
+                                batch = fixed_batch
+                            except Exception as split_error:
+                                insert_logger.error(f"Error fixing dimensions: {str(split_error)}")
+
+                        if retry_count > 0:
+                            insert_logger.warning(f"Batch {current_batch} failed, retrying... Error: {str(e)}")
+                            await asyncio.sleep(2)  # 增加重试间隔
+                        else:
+                            insert_logger.error(f"All retries failed for batch {current_batch}")
+                            raise last_error
 
                 all_res.extend(batch_res)
                 batch_time = round(time.perf_counter() - batch_start, 2)
                 insert_logger.info(f"Batch {current_batch}/{total_batches} completed in {batch_time} seconds")
 
-                # 更新进度
-                progress = min(75 + current_batch * 20 // total_batches, 95)
-                # 如果有可用的方法来更新进度
-                # update_progress(progress)
-
-                # 添加短暂延迟
-                await asyncio.sleep(0.1)
-
-            time_record["vectorstore_insert_time"] = round(time.perf_counter() - vectorstore_start, 2)
-            insert_logger.info(f"Vectorstore insertion completed in {time_record['vectorstore_insert_time']} seconds")
-            insert_logger.info(f'Total vectorstore insert number: {len(all_res)}')
+                # 添加较长的延迟以避免过载
+                await asyncio.sleep(0.5)
 
         except Exception as e:
             error_msg = f"Error during vectorstore insertion after processing {len(all_res)} documents: {str(e)}"
             insert_logger.error(error_msg)
             if len(all_res) > 0:
-                # 部分成功的情况
                 return len(all_res), time_record
             raise
 
