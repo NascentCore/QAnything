@@ -17,6 +17,7 @@ from langchain_community.vectorstores.milvus import Milvus
 from langchain_elasticsearch import ElasticsearchStore
 import time
 import traceback
+import asyncio
 
 
 class SelfParentRetriever(ParentDocumentRetriever):
@@ -128,7 +129,11 @@ class SelfParentRetriever(ParentDocumentRetriever):
         time_record = {"split_time": round(time.perf_counter() - split_start, 2)}
 
         embed_docs = copy.deepcopy(docs)
+        embed_start = time.perf_counter()
+        insert_logger.info(f"Starting to process {len(embed_docs)} documents for embedding...")
+
         # 补充metadata信息
+        clean_start = time.perf_counter()
         for idx, doc in enumerate(embed_docs):
             del doc.metadata['title_lst']
             del doc.metadata['has_table']
@@ -137,23 +142,108 @@ class SelfParentRetriever(ParentDocumentRetriever):
             del doc.metadata['nos_key']
             del doc.metadata['faq_dict']
             del doc.metadata['page_id']
+        time_record["clean_metadata_time"] = round(time.perf_counter() - clean_start, 2)
+        insert_logger.info(f"Cleaned metadata in {time_record['clean_metadata_time']} seconds")
 
-        res = await self.vectorstore.aadd_documents(embed_docs, time_record=time_record)
-        insert_logger.info(f'vectorstore insert number: {len(res)}, {res[0]}')
+        # 添加向量存储的进度日志
+        insert_logger.info("Starting vectorstore insertion...")
+        vectorstore_start = time.perf_counter()
+
+        # 修改批处理大小和重试逻辑
+        batch_size = 50  # 减小批处理大小
+        all_res = []
+        total_batches = (len(embed_docs) - 1) // batch_size + 1
+
+        try:
+            for i in range(0, len(embed_docs), batch_size):
+                batch_start = time.perf_counter()
+                batch = embed_docs[i:i + batch_size]
+                current_batch = i // batch_size + 1
+                insert_logger.info(f"Processing vectorstore batch {current_batch}/{total_batches}, size: {len(batch)}")
+
+                retry_count = 3
+                last_error = None
+                while retry_count > 0:
+                    try:
+                        # 在添加文档前检查向量维度
+                        for doc in batch:
+                            content_length = len(doc.page_content.split())
+                            if content_length > 200:  # 如果内容过长，进行截断
+                                doc.page_content = ' '.join(doc.page_content.split()[:200])
+                                insert_logger.warning(f"Document content truncated to 200 tokens")
+
+                        batch_res = await self.vectorstore.aadd_documents(batch, time_record=time_record)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        retry_count -= 1
+                        error_msg = str(e)
+
+                        if "Field data size misaligned" in error_msg or "field dim is" in error_msg:
+                            insert_logger.warning(f"Dimension mismatch in batch {current_batch}, attempting to fix...")
+                            # 尝试修复维度问题
+                            try:
+                                # 重新分割过长的文档
+                                text_splitter = RecursiveCharacterTextSplitter(
+                                    chunk_size=200,
+                                    chunk_overlap=20,
+                                    length_function=num_tokens_embed
+                                )
+                                fixed_batch = []
+                                for doc in batch:
+                                    split_docs = text_splitter.split_documents([doc])
+                                    fixed_batch.extend(split_docs)
+                                batch = fixed_batch
+                            except Exception as split_error:
+                                insert_logger.error(f"Error fixing dimensions: {str(split_error)}")
+
+                        if retry_count > 0:
+                            insert_logger.warning(f"Batch {current_batch} failed, retrying... Error: {str(e)}")
+                            await asyncio.sleep(2)  # 增加重试间隔
+                        else:
+                            insert_logger.error(f"All retries failed for batch {current_batch}")
+                            raise last_error
+
+                all_res.extend(batch_res)
+                batch_time = round(time.perf_counter() - batch_start, 2)
+                insert_logger.info(f"Batch {current_batch}/{total_batches} completed in {batch_time} seconds")
+
+                # 添加较长的延迟以避免过载
+                await asyncio.sleep(0.5)
+
+        except Exception as e:
+            error_msg = f"Error during vectorstore insertion after processing {len(all_res)} documents: {str(e)}"
+            insert_logger.error(error_msg)
+            if len(all_res) > 0:
+                return len(all_res), time_record
+            raise
+
+        # ES存储部分
         if es_store is not None:
             try:
                 es_start = time.perf_counter()
-                # docs的doc_id是file_id + '_' + i
+                insert_logger.info("Starting Elasticsearch insertion...")
                 docs_ids = [doc.metadata['file_id'] + '_' + str(i) for i, doc in enumerate(embed_docs)]
                 es_res = await es_store.aadd_documents(embed_docs, ids=docs_ids)
                 time_record['es_insert_time'] = round(time.perf_counter() - es_start, 2)
-                insert_logger.info(f'es_store insert number: {len(es_res)}, {es_res[0]}')
+                insert_logger.info(f"Elasticsearch insertion completed in {time_record['es_insert_time']} seconds")
+                insert_logger.info(f'es_store insert number: {len(es_res)}, first id: {es_res[0]}')
             except Exception as e:
                 insert_logger.error(f"Error in aadd_documents on es_store: {traceback.format_exc()}")
 
+        # Docstore存储部分
         if add_to_docstore:
+            docstore_start = time.perf_counter()
+            insert_logger.info("Starting docstore insertion...")
             await self.docstore.amset(full_docs)
-        return len(res), time_record
+            docstore_insert_time = round(time.perf_counter() - docstore_start, 2)
+            insert_logger.info(f"Docstore insertion completed in {docstore_insert_time} seconds")
+
+        total_time = round(time.perf_counter() - split_start, 2)
+        time_record["total_time"] = total_time
+        insert_logger.info(f"Total document insertion completed in {total_time} seconds")
+
+        return len(all_res), time_record
 
 
 class ParentRetriever:

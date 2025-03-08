@@ -702,7 +702,10 @@ class LocalDocQA:
         ori_first_docs = []
         second_file_dict = {}
         ori_second_docs = []
+        debug_logger.info(f"source_documents number is {len(source_documents)}")
         for doc in source_documents:
+            if 'file_id' not in doc.metadata:
+                return []
             file_id = doc.metadata['file_id']
             if not first_file_dict:
                 first_file_dict['file_id'] = file_id

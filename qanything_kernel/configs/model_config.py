@@ -37,31 +37,21 @@ Today's date is {{today_date}}. The current time is {{current_time}}.
 """
 
 SYSTEM_CN = """
-你是公司的客服，我是客户，我现在正在向你咨询；
-具体产品的详细信息来自<DOCUMENTS>和</DOCUMENTS>;
-K系列产品是太空舱，M系列是苹果舱;
-如果问题是对比产品的不同，除非明确说明，否则请总结主要差异，不要用表格形式展示;
-对于是否、有无的问题，只需正向回答即可;
-不要出现判断逻辑的话，沟通要有角色带入，模仿客服导购话术;
-如果客户问有没有详细资料或宣传手册，请给出产品文档列表（不包括图片文档）;
-答复尾部换行增加语句：如需了解更多详情请参考产品文档。
+你是一个交通行业的写作助手;
 今天日期是 {{today_date}}. 现在的时间是 {{current_time}}.
 """
 
 INSTRUCTIONS = """
-- All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- If the reference information does not contain an answer to the question, please immediately respond: "The retrieved reference information does not provide sufficient details.".
-- Before answering, confirm the number of key points or pieces of information required, ensuring nothing is overlooked.
-- Return your answer in Markdown formatting, Respond using the same language as the content between <QUESTION> and </QUESTION> .
-- If the answer contains Chinese, please translate it into English and output only the English translation.
-- Now, answer the following question based on the above retrieved documents:
+- <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
+- 如果参考信息中不包含问题的答案，请根据你的能力进行回答，回答要符合事实，不要胡编乱造。
+- 使用 Markdown 格式返回您的答案，并使用 <QUESTION> 和 </QUESTION> 之间的内容相同的语言作答。
+- 现在，请根据以上检索到的文档回答以下问题：
 {{question}}
 """
 
 INSTRUCTIONS_CN = """
 - <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
-- 如果参考信息中不包含问题的答案，请立即回复：“检索到的参考信息并未提供充足的信息。”
-- 在回答之前，请确认所需关键点或信息的数量，确保没有遗漏。
+- 如果参考信息中不包含问题的答案，请根据你的能力进行回答，回答要符合事实，不要胡编乱造。
 - 使用 Markdown 格式返回您的答案，并使用 <QUESTION> 和 </QUESTION> 之间的内容相同的语言作答。
 - 现在，请根据以上检索到的文档回答以下问题：
 {{question}}
@@ -69,8 +59,7 @@ INSTRUCTIONS_CN = """
 
 INSTRUCTIONS2 = """
 - All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- If you cannot answer based on the given information, you need to answer based on your own knowledge, And combined with the context, but don't make up anything. If it is beyond your knowledge, you can answer \"抱歉，已知的信息不足，因此无法回答。\".
-- Before answering, confirm the number of key points or pieces of information required, ensuring nothing is overlooked.
+- If the reference information does not contain the answer to the question, please answer it to the best of your ability. Your answer should be factual and not made up.
 - Now, answer the following question based on the above retrieved documents(Let's think step by step):
 {{question}}
 - Return your answer in Markdown formatting, and in the same language as the question "{{question}}".
@@ -95,17 +84,18 @@ PROMPT_TEMPLATE = """
 """
 
 CUSTOM_PROMPT_TEMPLATE = """
-<USER_INSTRUCTIONS>
+<FIRST_DOCUMENTS>
 {{custom_prompt}}
-</USER_INSTRUCTIONS>
+</FIRST_DOCUMENTS>
 
 <DOCUMENTS>
 {{context}}
 </DOCUMENTS>
 
 <INSTRUCTIONS>
-- All contents between <DOCUMENTS> and </DOCUMENTS> are reference information retrieved from an external knowledge base.
-- Now, answer the following question based on the above retrieved documents(Let's think step by step):
+- <DOCUMENTS> 和 </DOCUMENTS> 之间的所有内容均为从外部知识库检索到的参考信息。
+- <FIRST_DOCUMENTS> 和 </FIRST_DOCUMENTS> 之间的所有内容也是参考信息，优先级高于<DOCUMENTS> 和 </DOCUMENTS> 之间的内容。
+- 使用 Markdown 格式返回您的答案，现在，请根据以上检索到的文档回答以下问题：
 {{question}}
 </INSTRUCTIONS>
 """
@@ -146,23 +136,23 @@ VECTOR_SEARCH_TOP_K = 30
 VECTOR_SEARCH_SCORE_THRESHOLD = 0.3
 
 KB_SUFFIX = '_240625'
-# MILVUS_HOST_LOCAL = 'milvus-standalone-local'
-# MILVUS_PORT = 19530
-MILVUS_HOST_LOCAL = GATEWAY_IP
-MILVUS_PORT = 19540
+MILVUS_HOST_LOCAL = 'milvus-standalone-writer'
+MILVUS_PORT = 19530
+#MILVUS_HOST_LOCAL = GATEWAY_IP
+#MILVUS_PORT = 19540
 MILVUS_COLLECTION_NAME = 'qanything_collection' + KB_SUFFIX
 
-# ES_URL = 'http://es-container-local:9200/'
-ES_URL = f'http://{GATEWAY_IP}:9210/'
+ES_URL = 'http://es-container-writer:9200/'
+#ES_URL = f'http://{GATEWAY_IP}:9220/'
 ES_USER = None
 ES_PASSWORD = None
 ES_TOP_K = 30
 ES_INDEX_NAME = 'qanything_es_index' + KB_SUFFIX
 
-# MYSQL_HOST_LOCAL = 'mysql-container-local'
-# MYSQL_PORT_LOCAL = 3306
-MYSQL_HOST_LOCAL = GATEWAY_IP
-MYSQL_PORT_LOCAL = 3316
+MYSQL_HOST_LOCAL = 'mysql-container-writer'
+MYSQL_PORT_LOCAL = 3306
+#MYSQL_HOST_LOCAL = GATEWAY_IP
+#MYSQL_PORT_LOCAL = 3316
 MYSQL_USER_LOCAL = 'root'
 MYSQL_PASSWORD_LOCAL = '123456'
 MYSQL_DATABASE_LOCAL = 'qanything'
@@ -186,6 +176,7 @@ LOCAL_EMBED_BATCH = 1
 LOCAL_EMBED_THREADS = 1
 LOCAL_EMBED_PATH = os.path.join(root_path, 'qanything_kernel/dependent_server/embedding_server', 'embedding_model_configs_v0.0.1')
 LOCAL_EMBED_MODEL_PATH = os.path.join(LOCAL_EMBED_PATH, "embed.onnx")
+EMBEDDING_CONCURRENCY = 5
 
 TOKENIZER_PATH = os.path.join(root_path, 'qanything_kernel/connector/llm/tokenizer_files')
 
