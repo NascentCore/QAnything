@@ -104,7 +104,9 @@ services:
 
   qanything_local:
     container_name: qanything-container-local
-    image: xixihahaliu01/qanything-linux:v1.5.1
+    # 本地构建后，替换为本地构建的镜像，以便测试
+    # docker build -f build_images/Dockerfile -t qanything:latest .
+    image: qanything:latest
     command: /bin/bash -c "cd /workspace/QAnything && bash scripts/entrypoint.sh"
     privileged: true
     shm_size: '8gb'
