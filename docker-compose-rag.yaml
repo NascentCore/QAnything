@@ -1,11 +1,11 @@
 services:
   elasticsearch:
-    container_name: es-container-local
+    container_name: es-container-writer-prd
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.2
     user: root
     privileged: true
     ports:
-      - "9210:9200"
+      - "9230:9200"
     restart: on-failure
     environment:
       - discovery.type=single-node
@@ -27,7 +27,7 @@ services:
       retries: 3
 
   etcd:
-    container_name: milvus-etcd-local
+    container_name: milvus-etcd-writer-prd
     image: quay.io/coreos/etcd:v3.5.5
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -44,14 +44,11 @@ services:
       retries: 3
 
   minio:
-    container_name: milvus-minio-local
+    container_name: milvus-minio-writer-prd
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-    # ports:
-    #   - "9001:9001"
-    #       - "9000:9000"
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/minio:/minio_data
     command: minio server /minio_data --console-address ":9001"
@@ -62,7 +59,7 @@ services:
       retries: 3
 
   standalone:
-    container_name: milvus-standalone-local
+    container_name: milvus-standalone-writer-prd
     image: milvusdb/milvus:v2.4.8
     logging:
       driver: "json-file"
@@ -84,38 +81,36 @@ services:
       timeout: 20s
       retries: 3
     ports:
-      - "19540:19530"
+      - "19550:19530"
     depends_on:
       - "etcd"
       - "minio"
 
   mysql:
-    container_name: mysql-container-local
+    container_name: mysql-container-writer-prd
     privileged: true
-    image: mysql:8.4
+    image: mysql:8.0
     ports:
-      - "3316:3306"
+      - "3336:3306"
     command: --max-connections=10000
     environment:
       - MYSQL_ROOT_PASSWORD=123456
+      - TZ=Asia/Shanghai
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mysql:/var/lib/mysql
 
-
   qanything_local:
-    container_name: qanything-container-local
-    # 本地构建后，替换为本地构建的镜像，以便测试
-    # docker build -f build_images/Dockerfile -t qanything:latest .
+    container_name: qanything-container-writer-prd
     image: qanything:latest
     command: /bin/bash -c "cd /workspace/QAnything && bash scripts/entrypoint.sh"
     privileged: true
     shm_size: '8gb'
     volumes:
       - ${DOCKER_VOLUME_DIRECTORY:-.}/:/workspace/QAnything/
-    # ports:
-    #   - "8777:8777"
-    network_mode: "host"
+    ports:
+      - "8779:8777"
     environment:
+      - TZ=Asia/Shanghai
       - NCCL_LAUNCH_MODE=PARALLEL
       - GPUID=${GPUID:-0}
       - USER_IP=${USER_IP:-0.0.0.0}
@@ -129,8 +124,3 @@ services:
         condition: service_healthy
     tty: true
     stdin_open: true
-
-#networks:
-#  default:
-#    name: QAnything
-
