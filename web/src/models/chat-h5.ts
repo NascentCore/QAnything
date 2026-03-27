@@ -1,4 +1,5 @@
 import { cahtActionH5, generateUUID, scrollH5ChatBodyToBottom } from '@/utils';
+import storage from '@/utils/store';
 import { useEffect, useState } from 'react';
 
 const activeKnowledgeList = H5_DEFAULT_ACTIVE_KNOWLEDGE_LIST;
@@ -42,16 +43,18 @@ export default () => {
   const [activeChat, setActiveChat] = useState('demo');
   console.log('chatStore', chatStore);
   useEffect(() => {
-    const _chatStore = localStorage.getItem(chat_store_key);
-    if (_chatStore) {
-      const _chatStoreJson = JSON.parse(_chatStore);
-      setChatStore(_chatStoreJson);
-      setActiveChat(Object.keys(_chatStoreJson)[0]);
-    }
+    const init = async () => {
+      const _chatStoreJson: any = await storage.getItem(chat_store_key);
+      if (_chatStoreJson) {
+        setChatStore(_chatStoreJson);
+        setActiveChat(Object.keys(_chatStoreJson)[0]);
+      }
+    };
+    init();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(chat_store_key, JSON.stringify(chatStore));
+    storage.setItem(chat_store_key, chatStore);
   }, [chatStore]);
 
   // 新增聊天数据

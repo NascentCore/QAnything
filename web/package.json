@@ -46,6 +46,7 @@
     "antd": "^5.13.2",
     "antd-style": "^3.6.1",
     "classnames": "^2.5.1",
+    "localforage": "^1.10.0",
     "lodash": "^4.17.21",
     "mermaid": "^11.3.0",
     "moment": "^2.30.1",

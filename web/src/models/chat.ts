@@ -1,8 +1,9 @@
 import { api_list_knowledge_base } from '@/services';
 import { cahtAction, generateUUID, scrollChatBodyToBottom } from '@/utils';
+import storage from '@/utils/store';
 import { useEffect, useState } from 'react';
 
-const updateFlagKey = 'code_update_2024_11_10';
+const updateFlagKey = 'code_update_2024_12_30';
 if (!localStorage.getItem(updateFlagKey)) {
   localStorage.clear();
   localStorage.setItem(updateFlagKey, 'true');
@@ -56,25 +57,27 @@ export default () => {
   const [activeChat, setActiveChat] = useState('demo');
   console.log('chatStore', chatStore);
   useEffect(() => {
-    const _chatStore = localStorage.getItem(chat_store_key);
-    const _activeChat = localStorage.getItem(chat_store_active_key);
-    const _knowledgeListSelect = localStorage.getItem(chat_store_knowledge_list_select_key);
-    if (_chatStore) {
-      const _chatStoreJson = JSON.parse(_chatStore);
-      setChatStore(_chatStoreJson);
-      setActiveChat(Object.keys(_chatStoreJson)[0]);
-    }
-    if (_activeChat) {
-      setActiveChat(_activeChat);
-    }
-    if (_knowledgeListSelect) {
-      const _knowledgeListSelectJson = JSON.parse(_knowledgeListSelect);
-      setKnowledgeListSelect(_knowledgeListSelectJson);
-    }
+    const init = async () => {
+      const _chatStoreJson: any = await storage.getItem(chat_store_key);
+      const _activeChat = localStorage.getItem(chat_store_active_key);
+      const _knowledgeListSelect = localStorage.getItem(chat_store_knowledge_list_select_key);
+      if (_chatStoreJson) {
+        setChatStore(_chatStoreJson);
+        setActiveChat(Object.keys(_chatStoreJson)[0]);
+      }
+      if (_activeChat) {
+        setActiveChat(_activeChat);
+      }
+      if (_knowledgeListSelect) {
+        const _knowledgeListSelectJson = JSON.parse(_knowledgeListSelect);
+        setKnowledgeListSelect(_knowledgeListSelectJson);
+      }
+    };
+    init();
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(chat_store_key, JSON.stringify(chatStore));
+    storage.setItem(chat_store_key, chatStore);
   }, [chatStore]);
 
   useEffect(() => {
